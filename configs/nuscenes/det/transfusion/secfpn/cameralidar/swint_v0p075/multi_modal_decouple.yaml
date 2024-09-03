@@ -1,0 +1,237 @@
+##TODO:、batchsize
+optimizer:
+  lr: 2.0e-4 # 8GPU * 4Per  
+
+max_epochs: 6 # 6 12
+
+data:
+  samples_per_gpu: 2 # 1 2
+  workers_per_gpu: 8 # 8 16
+  
+
+_dim_: 256 # 256 + 80
+_pos_dim_: 128 # dim // 2
+_ffn_dim_: 512 # dim * 2
+
+_num_levels_: 1
+bev_h_: 180
+bev_w_: 180
+
+_dual_dims_: 336 # 256 + 80
+_dual_ffn_dim_: 672 # 336 *2
+
+_camera_dim_: 80
+_camera_pos_dim_: 40
+_camera_ffn_dim_: 160
+
+_lidar_dim_: 256
+_lidar_pos_dim_: 128
+_lidar_ffn_dim_: 512
+
+model:
+  # random_bev_feat_mask_ratio: 0.25 ## bev feat mask/noise 
+  encoders:
+    camera:
+      vtransform:
+        type: DepthLSSTransform
+        out_channels: 80 6 
+  decoder:
+    backbone:
+      type: SECOND
+      in_channels: 336
+      out_channels: [128, 256]
+      layer_nums: [5, 5]
+      layer_strides: [1, 2]
+      norm_cfg:
+        type: BN
+        eps: 1.0e-3
+        momentum: 0.01
+      conv_cfg:
+        type: Conv2d
+        bias: false
+    neck:
+      type: SECONDFPN
+      in_channels: [128, 256]
+      out_channels: [256, 256]
+      upsample_strides: [1, 2]
+      norm_cfg:
+        type: BN
+        eps: 1.0e-3
+        momentum: 0.01
+      upsample_cfg:
+        type: deconv
+        bias: false
+      use_conv_for_no_stride: true
+  heads:
+    object:
+      in_channels: 512 # 512 256 336
+  fuser:
+    type: PerceptionTransformer
+    bev_h: ${bev_h_}
+    bev_w: ${bev_w_}
+    embed_dims: ${_dim_}
+    camera_dims: ${_camera_dim_}
+    lidar_dims: ${_lidar_dim_}
+    camera_positional_encoding:
+      type: LearnedPositionalEncoding
+      num_feats: ${_camera_pos_dim_}
+      row_num_embed: ${bev_h_}
+      col_num_embed: ${bev_w_}
+    lidar_positional_encoding:
+      type: LearnedPositionalEncoding
+      num_feats: ${_lidar_pos_dim_}
+      row_num_embed: ${bev_h_}
+      col_num_embed: ${bev_w_}
+
+
+    camera_transformer:
+      type: BEVFormerEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'BEVFormerLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+        feedforward_channels: ${_camera_ffn_dim_}
+        ffn_embed_dims: ${_camera_dim_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, ffn, norm]
+
+    lidar_transformer:
+      type: BEVFormerEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'BEVFormerLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+        feedforward_channels: ${_lidar_ffn_dim_}
+        ffn_embed_dims: ${_lidar_dim_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, ffn, norm]
+
+    cqlkv_transformer: # camera query  liadr key value
+      type: InteractionEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'InteractionLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+        feedforward_channels: ${_camera_ffn_dim_}
+        ffn_embed_dims: ${_camera_dim_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, inter_attn, norm, ffn, norm]
+
+    lqckv_transformer: # lidar query  camera key value
+      type: InteractionEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'InteractionLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+        feedforward_channels: ${_lidar_ffn_dim_}
+        ffn_embed_dims: ${_lidar_dim_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, inter_attn, norm, ffn, norm]
+
+    fusion_transformer:
+      type: BEVFormerEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'BEVFormerLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_dual_dims_}
+            value_dims: ${_dual_dims_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_dual_dims_}
+            value_dims: ${_dual_dims_}
+            num_levels: 1
+        feedforward_channels: ${_dual_ffn_dim_}
+        ffn_embed_dims: ${_dual_dims_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, ffn, norm]
+
+
+############ test scene corruption ############################
+
+# ##########################################Lidar#############################################
+
+# beam_missing   crosstalk  fog  incomplete_echo motion_blur  snow 
+# corruption: beam_missing
+
+# severity: heavy # light moderate heavy
+
+# corruption_root: '/data/8T/public/OpenDataLab___nuScenes-C/raw/pointcloud/nuScenes-C/nuScenes-C'
+
+# #############################################################################################
+
+# #########################################Camera#############################################
+
+# # Brightness  ColorQuant Fog  LowLight MotionBlur Snow
+# camera_corruption: Brightness
+
+# # # easy mid hard
+# camera_severity: hard
+
+# camera_corruption_root: '/data/8T/public/OpenDataLab___nuScenes-C/raw/image/nuScenes-C/nuScenes-C'
+
+###############################################################################################
+
+# data:
+#   test:
+    
+#     corruption: ${corruption}  ##TODO:lidar_scene_corruption
+#     severity: ${severity}
+#     corruption_root: ${corruption_root}
+
+#     camera_corruption: ${camera_corruption} ##TODO:camera_scene_corruption
+#     camera_severity: ${camera_severity}
+#     camera_corruption_root: ${camera_corruption_root}
+
+    # view_drop_nums: 1 # 0 1 3 5 ##TODO: camer_view_num
