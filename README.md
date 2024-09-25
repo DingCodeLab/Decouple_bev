@@ -1,6 +1,6 @@
 ## Paper
 
-Multi-Modal Decouple Network for Robust 3D Object Detection
+Multi-Modal Decouple Network for Robust 3D Object Detection under Data Corruptions
 
 ## methods
 
