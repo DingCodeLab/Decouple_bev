@@ -4,7 +4,7 @@ Multi-Modal Decouple and Recouple Network for Robust 3D Object Detection
 
 ## methods
 
-![PWC](framework.png)
+![PWC](framework_V2.png)
 
 ## Requirments
 
