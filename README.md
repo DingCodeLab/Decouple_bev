@@ -1,16 +1,10 @@
 ## Paper
 
-Multi-Modal Decouple Network for Robust 3D Object Detection under Data Corruptions
+Multi-Modal Decouple and Recouple Network for Robust 3D Object Detection
 
 ## methods
 
 ![PWC](framework.png)
-
-## Results
-
-Our model consistently outperforms SOTA models on all types of unknown data corruptions including sensor configurations and scene conditions of LiDAR, camera, and both. In addition, it maintains SOTA on clean data. 
-
-<img src="compare.png" width = "80%" />
 
 ## Requirments
 
