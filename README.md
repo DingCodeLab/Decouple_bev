@@ -10,7 +10,7 @@ Multi-Modal Decouple and Recouple Network for Robust 3D Object Detection
 
 - Python >= 3.8, \<3.9
 - OpenMPI = 4.0.4 and mpi4py = 3.0.3 (Needed for torchpack)
-- Pillow = 8.4.0 (see [here](https://github.com/mit-han-lab/bevfusion/issues/63))
+- Pillow = 8.4.0
 - [PyTorch](https://github.com/pytorch/pytorch) >= 1.9, \<= 1.10.2
 - [tqdm](https://github.com/tqdm/tqdm)
 - [torchpack](https://github.com/mit-han-lab/torchpack)
