@@ -1,5 +1,6 @@
 from .add import *
 from .conv import *
+from .MOE_fusers import *
 from .transformerfusion import *
 from .transformer import *
 from .custom_base_transformer_layer import *

@@ -1,7 +1,7 @@
 import argparse
 import copy
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 import random
 import time
 
@@ -22,7 +22,7 @@ def main():
     #dist.init()
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", metavar="FILE", help="config file",default='configs/nuscenes/det/transfusion/secfpn/camera+lidar/swint_v0p075/convfuser.yaml')
+    parser.add_argument("--config", metavar="FILE", help="config file",default='configs/nuscenes/det/transfusion/secfpn/camera+lidar/swint_v0p075/Decouple_Recouple_BEV.yaml')
     parser.add_argument("--run-dir", metavar="DIR", help="run directory")
     args, opts = parser.parse_known_args()
 

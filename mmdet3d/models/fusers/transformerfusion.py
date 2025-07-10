@@ -12,14 +12,17 @@ from mmcv.cnn.bricks.transformer import build_positional_encoding
 
 from .mm_cross_attention import CustomMSDeformableAttention
 
-from mmdet3d.models.builder import FUSERS
+from mmdet3d.models.builder import FUSERS,build_fuser
 from mmcv.runner.base_module import BaseModule
 from mmcv.runner import force_fp32, auto_fp16
 
 import torch.nn.functional as F
+import numpy as np
 
 from mmengine.visualization import Visualizer
 import os
+
+from mmdet3d.models.losses import InvaraintInfoNCE,InvariantLoss
 
 @FUSERS.register_module()
 class PerceptionTransformer(BaseModule):
@@ -35,6 +38,9 @@ class PerceptionTransformer(BaseModule):
                  cqlkv_transformer=None,
                  lqckv_transformer=None,
                  fusion_transformer=None,
+                 moe_feature_fusion=None,
+                 modality_invariant_encoder=None,
+                 invariant_dims=32,
                  embed_dims=256,
                  lidar_dims=256,
                  camera_dims=256,
@@ -42,13 +48,28 @@ class PerceptionTransformer(BaseModule):
                  lidar_positional_encoding=None,
                  bev_h=30,
                  bev_w=30,
+                 drop_modality = None,
                  **kwargs):
         super(PerceptionTransformer, self).__init__(**kwargs)
         self.camera_transformer = build_transformer_layer_sequence(camera_transformer)
         self.lidar_transformer = build_transformer_layer_sequence(lidar_transformer)
         self.cqlkv_transformer = build_transformer_layer_sequence(cqlkv_transformer)
         self.lqckv_transformer = build_transformer_layer_sequence(lqckv_transformer)
-        self.fusion_transformer = build_transformer_layer_sequence(fusion_transformer)
+        if fusion_transformer is not None:
+            self.fusion_transformer = build_transformer_layer_sequence(fusion_transformer)
+        else:
+            self.fusion_transformer = None
+        if moe_feature_fusion is not None:
+            self.moe_feature_fusion = build_fuser(moe_feature_fusion)
+        else:
+            self.moe_feature_fusion = None
+        if modality_invariant_encoder is not None:
+            self.modality_invariant_encoder = build_fuser(modality_invariant_encoder)
+            # self.invariant_loss = InvaraintInfoNCE(invariant_dims, camera_dims,lidar_dims)
+            self.invariant_loss = InvariantLoss(invariant_dims, camera_dims,lidar_dims)
+        else:
+            self.modality_invariant_encoder = None
+        
         self.embed_dims = embed_dims
         self.lidar_dims = lidar_dims
         self.camera_dims = camera_dims
@@ -58,6 +79,8 @@ class PerceptionTransformer(BaseModule):
         self.bev_w = bev_w
         self.camera_positional_encoding = build_positional_encoding(camera_positional_encoding)
         self.lidar_positional_encoding = build_positional_encoding(lidar_positional_encoding)
+        
+        self.drop_modality = drop_modality
 
         self.init_layers()
         self.init_weights()
@@ -92,6 +115,7 @@ class PerceptionTransformer(BaseModule):
             bev_w,
             camera_bev_pos=None,
             lidar_bev_pos=None,
+            metas=None,
             **kwargs):
         """
         obtain bev features.
@@ -108,9 +132,15 @@ class PerceptionTransformer(BaseModule):
         spatial_shape = (h, w)
         spatial_shapes.append(spatial_shape)
         
+        # ####################################################################################################################
+        if self.modality_invariant_encoder is not None:
+            camera_invar_feat, lidar_invar_feat = self.modality_invariant_encoder(camera_feat, lidar_feat)
+        # ####################################################################################################################
+        
+        
         camera_feat = camera_feat.flatten(2).permute(0, 2, 1)
         lidar_feat = lidar_feat.flatten(2).permute(0, 2, 1)
-        
+
 
         spatial_shapes = torch.as_tensor(
             spatial_shapes, dtype=torch.long, device=lidar_bev_pos.device)
@@ -141,7 +171,63 @@ class PerceptionTransformer(BaseModule):
             **kwargs
         )
         
+        # ####################################################################################################################
+        if self.modality_invariant_encoder is not None:
             
+            invariant_loss = self.invariant_loss(camera_invar_feat, 
+                                                 lidar_invar_feat, 
+                                                 camera_bev_embed.permute(0, 2, 1).view(bs, -1, h, w), 
+                                                 lidar_bev_embed.permute(0, 2, 1).view(bs, -1, h, w))
+
+            camera_invar_feat = camera_invar_feat.flatten(2).permute(0, 2, 1)
+            lidar_invar_feat = lidar_invar_feat.flatten(2).permute(0, 2, 1)
+            
+            camera_bev_embed = self.cqlkv_transformer(
+                camera_bev_embed.permute(1, 0, 2),
+                camera_invar_feat,
+                lidar_feat,
+                bev_h=bev_h,
+                bev_w=bev_w,
+                bev_pos=camera_bev_pos,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                **kwargs
+            )
+        
+            lidar_bev_embed = self.lqckv_transformer(
+                lidar_bev_embed.permute(1, 0, 2),
+                lidar_invar_feat,
+                camera_feat,
+                bev_h=bev_h,
+                bev_w=bev_w,
+                bev_pos=lidar_bev_pos,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                **kwargs
+            )
+            
+            if self.moe_feature_fusion is not None:
+                bev_embed,entropy_loss = self.moe_feature_fusion(camera_bev_embed,lidar_bev_embed)
+                return (bev_embed, invariant_loss,camera_invar_feat.permute(0, 2, 1).view(bs, -1, h, w),entropy_loss)
+            else:
+        
+                dual_bev_embed = torch.cat((camera_bev_embed,lidar_bev_embed), dim=-1).permute(1, 0, 2)
+                dual_feat = torch.cat((camera_feat,lidar_feat), dim=-1)
+                dual_bev_pos = torch.cat((camera_bev_pos,lidar_bev_pos), dim=-1)
+
+                bev_embed = self.fusion_transformer(
+                    dual_bev_embed,
+                    dual_feat,
+                    dual_feat,
+                    bev_h=bev_h,
+                    bev_w=bev_w,
+                    bev_pos=dual_bev_pos,
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    **kwargs
+                )
+                return (bev_embed, invariant_loss,camera_invar_feat.permute(0, 2, 1).view(bs, -1, h, w))
+         # ####################################################################################################################       
         
         camera_bev_embed = self.cqlkv_transformer(
             camera_bev_embed.permute(1, 0, 2),
@@ -166,29 +252,32 @@ class PerceptionTransformer(BaseModule):
             level_start_index=level_start_index,
             **kwargs
         )
+
+        if self.moe_feature_fusion is not None:
+            bev_embed,entropy_loss = self.moe_feature_fusion(camera_bev_embed,lidar_bev_embed)
+            return (bev_embed,entropy_loss)
+        else:
         
-        dual_bev_embed = torch.cat((camera_bev_embed,lidar_bev_embed), dim=-1).permute(1, 0, 2)
-        dual_feat = torch.cat((camera_feat,lidar_feat), dim=-1)
-        dual_bev_pos = torch.cat((camera_bev_pos,lidar_bev_pos), dim=-1)
+            dual_bev_embed = torch.cat((camera_bev_embed,lidar_bev_embed), dim=-1).permute(1, 0, 2)
+            dual_feat = torch.cat((camera_feat,lidar_feat), dim=-1)
+            dual_bev_pos = torch.cat((camera_bev_pos,lidar_bev_pos), dim=-1)
 
-
-        bev_embed = self.fusion_transformer(
-            dual_bev_embed,
-            dual_feat,
-            dual_feat,
-            bev_h=bev_h,
-            bev_w=bev_w,
-            bev_pos=dual_bev_pos,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            **kwargs
-        )    
-
-        return bev_embed
+            bev_embed = self.fusion_transformer(
+                dual_bev_embed,
+                dual_feat,
+                dual_feat,
+                bev_h=bev_h,
+                bev_w=bev_w,
+                bev_pos=dual_bev_pos,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                **kwargs
+            )
+            return bev_embed
     
     
     @auto_fp16(apply_to=('mlvl_feats'))
-    def forward(self, mlvl_feats):
+    def forward(self, mlvl_feats,metas=None):
         """Forward function.
         Args:
             mlvl_feats (tuple[Tensor]): Features from the upstream
@@ -222,5 +311,6 @@ class PerceptionTransformer(BaseModule):
                 self.bev_w,
                 camera_bev_pos=camera_bev_pos,
                 lidar_bev_pos=lidar_bev_pos,
+                metas=metas,
         )
         return outputs

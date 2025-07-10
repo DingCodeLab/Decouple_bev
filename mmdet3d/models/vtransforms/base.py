@@ -29,8 +29,10 @@ class BaseTransform(nn.Module):
         ybound: Tuple[float, float, float],
         zbound: Tuple[float, float, float],
         dbound: Tuple[float, float, float],
+        return_depth: bool = False,
     ) -> None:
         super().__init__()
+        self.return_depth = return_depth
         self.in_channels = in_channels
         self.image_size = image_size
         self.feature_size = feature_size
@@ -288,7 +290,12 @@ class BaseDepthTransform(BaseTransform):
             extra_rots=extra_rots,
             extra_trans=extra_trans,
         )
-
-        x = self.get_cam_feats(img, depth)
-        x = self.bev_pool(geom, x)
-        return x
+        if self.return_depth:
+            x,pred_depth = self.get_cam_feats(img, depth)
+            x = self.bev_pool(geom, x)
+            # pred_depth = pred_depth.softmax(dim=1)
+            return x,pred_depth,depth  ## feature pred_depth  gt_depth
+        else:
+            x = self.get_cam_feats(img, depth)
+            x = self.bev_pool(geom, x)
+            return x

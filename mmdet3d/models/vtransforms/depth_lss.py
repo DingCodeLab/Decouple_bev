@@ -24,6 +24,7 @@ class DepthLSSTransform(BaseDepthTransform):
         zbound: Tuple[float, float, float],
         dbound: Tuple[float, float, float],
         downsample: int = 1,
+        return_depth: bool = False,
     ) -> None:
         super().__init__(
             in_channels=in_channels,
@@ -35,6 +36,7 @@ class DepthLSSTransform(BaseDepthTransform):
             zbound=zbound,
             dbound=dbound,
         )
+        self.return_depth = return_depth
         self.dtransform = nn.Sequential(
             nn.Conv2d(1, 8, 1),
             nn.BatchNorm2d(8),
@@ -94,9 +96,17 @@ class DepthLSSTransform(BaseDepthTransform):
 
         x = x.view(B, N, self.C, self.D, fH, fW)
         x = x.permute(0, 1, 3, 4, 5, 2)
-        return x
+        if self.return_depth:
+            return x,depth
+        else:
+            return x
 
     def forward(self, *args, **kwargs):
         x = super().forward(*args, **kwargs)
-        x = self.downsample(x)
-        return x
+        if self.return_depth:
+            x,pred_depth,gt_depth = x[0],x[1],x[2]
+            x = self.downsample(x)
+            return x,pred_depth,gt_depth
+        else:
+            x = self.downsample(x)
+            return x

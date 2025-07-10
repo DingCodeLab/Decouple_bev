@@ -141,4 +141,24 @@ def train_model(
         runner.resume(cfg.resume_from)
     elif cfg.load_from:
         runner.load_checkpoint(cfg.load_from)
+    
+    if 'init_aux_invariant_heads_with_heads_flag' in cfg:
+        if cfg.init_aux_invariant_heads_with_heads_flag:
+            for name, param in model.module.heads.object.named_parameters():
+                aux_param = dict(model.module.aux_invariant_heads.object.named_parameters())[name]
+                if param.shape == aux_param.shape:
+                    aux_param.data.copy_(param.data)
+    
+    if 'frozen_lidar_encoders_flag' in cfg:
+        if cfg.frozen_lidar_encoders_flag:
+            for param in model.module.encoders.lidar.parameters():
+                param.requires_grad = False
+            model.module.encoders.lidar.eval()
+
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            logger.info("requires_grad: True "+ name)
+        else:
+            logger.info("requires_grad: False "+ name)
+    
     runner.run(data_loaders, [("train", 1)])

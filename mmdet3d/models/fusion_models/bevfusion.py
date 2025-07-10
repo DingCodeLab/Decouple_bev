@@ -16,10 +16,10 @@ from mmdet3d.models.builder import (
 from mmdet3d.ops import Voxelization, DynamicScatter
 from mmdet3d.models import FUSIONMODELS
 
+from mmdet3d.models.losses import get_depth_loss
 
 from .base import Base3DFusionModel
 
-from mmdet3d.models.utils import bev_ramdom_mask,bev_feat_add_gaussian_noise,bev_feat_selective_gaussian_noise
 
 __all__ = ["BEVFusion"]
 
@@ -32,6 +32,8 @@ class BEVFusion(Base3DFusionModel):
         fuser: Dict[str, Any],
         decoder: Dict[str, Any],
         heads: Dict[str, Any],
+        aux_camera_heads: Dict[str, Any] = None,
+        aux_invariant_heads: Dict[str, Any] = None,
         random_bev_feat_mask_ratio=None,
         **kwargs,
     ) -> None:
@@ -76,7 +78,25 @@ class BEVFusion(Base3DFusionModel):
         for name in heads:
             if heads[name] is not None:
                 self.heads[name] = build_head(heads[name])
+        
+        if self.training:
+            if aux_camera_heads is not None:
+                self.aux_camera_heads = nn.ModuleDict()
+                for name in aux_camera_heads:
+                    if aux_camera_heads[name] is not None:
+                        self.aux_camera_heads[name] = build_head(aux_camera_heads[name])
+            else:
+                self.aux_camera_heads = {}
 
+        if self.training:
+            if aux_invariant_heads is not None:
+                self.aux_invariant_heads = nn.ModuleDict()
+                for name in aux_invariant_heads:
+                    if aux_invariant_heads[name] is not None:
+                        self.aux_invariant_heads[name] = build_head(aux_invariant_heads[name])
+            else:
+                self.aux_invariant_heads = {}
+        
         if "loss_scale" in kwargs:
             self.loss_scale = kwargs["loss_scale"]
         else:
@@ -246,6 +266,10 @@ class BEVFusion(Base3DFusionModel):
                     lidar_aug_matrix,
                     metas,
                 )
+                if self.encoders.camera.vtransform.return_depth:
+                    pred_depth,gt_depth = feature[1],feature[2]
+                    feature = feature[0]
+
             elif sensor == "lidar":
                 feature = self.extract_lidar_features(points)
             else:
@@ -261,20 +285,6 @@ class BEVFusion(Base3DFusionModel):
         # else:
         #     assert len(features) == 1, features
         #     x = features[0]
-        
-        if self.random_bev_feat_mask_ratio is not None and self.training:
-            
-            # # TODO: 用mask
-            # features[0] = bev_ramdom_mask(features[0],6,self.random_bev_feat_mask_ratio)
-            # features[1] = bev_ramdom_mask(features[1],6,self.random_bev_feat_mask_ratio)
-            
-            ## TODO: 用高斯噪声
-            features[0] = bev_feat_add_gaussian_noise(features[0],0.25,self.random_bev_feat_mask_ratio)
-            features[1] = bev_feat_add_gaussian_noise(features[1],0.25,self.random_bev_feat_mask_ratio)
-            
-            # ## TODO: 用选择性高斯噪声
-            # features[0] = bev_feat_selective_gaussian_noise(features[0],0.25,self.random_bev_feat_mask_ratio)
-            # features[1] = bev_feat_selective_gaussian_noise(features[1],0.25,self.random_bev_feat_mask_ratio)
         
         if self.drop_modality is not None and self.training:
             if self.drop_modality == 'camera' and np.random.rand() < 0.75:
@@ -292,15 +302,35 @@ class BEVFusion(Base3DFusionModel):
         #   [0]:(batch,80,180,180) camera
         #   [1]:(batch,256,180,180) lidar
         if self.fuser is not None:
-
-            x = self.fuser(features).permute(0, 2, 1)
+            x = self.fuser(features,metas)
+            if isinstance(x, tuple):
+                if self.fuser.modality_invariant_encoder is not None and self.fuser.moe_feature_fusion is not None:
+                    invariant_loss,camera_invar_feat = x[1],x[2]
+                    entropy_loss = x[3]
+                    x = x[0]
+                elif self.fuser.modality_invariant_encoder is not None and self.fuser.moe_feature_fusion is None:
+                    invariant_loss,camera_invar_feat = x[1],x[2]
+                    entropy_loss = None
+                    x = x[0]
+                elif self.fuser.modality_invariant_encoder is None and self.fuser.moe_feature_fusion is not None:
+                    invariant_loss,camera_invar_feat = None, None
+                    entropy_loss = x[1]
+                    x = x[0]
+                else:
+                    invariant_loss,camera_invar_feat = None, None
+                    entropy_loss = None
+                    x = x[0]
+            else:
+                invariant_loss,camera_invar_feat = None, None
+                entropy_loss = None
+                
+            x = x.permute(0, 2, 1)
             x = x.view(features[0].shape[0], -1, features[0].shape[2], features[0].shape[3])
             batch_size = x.shape[0]
         else:
             assert len(features) == 1, features
             x = features[0]
-
-        batch_size = x.shape[0]
+            batch_size = x.shape[0]
 
         x = self.decoder["backbone"](x)
         x = self.decoder["neck"](x)
@@ -311,13 +341,87 @@ class BEVFusion(Base3DFusionModel):
                 if type == "object":
                     pred_dict = head(x, metas)
                     losses = head.loss(gt_bboxes_3d, gt_labels_3d, pred_dict)
+                    if self.encoders.camera.vtransform.return_depth:
+                        dbound = self.encoders.camera.vtransform.dbound
+                        depth_loss = get_depth_loss(gt_depth.squeeze(2),pred_depth,dbound)
+                        losses['depth_loss'] = 3*depth_loss
+                    if invariant_loss is not None:
+                        invariant_loss = invariant_loss.mean()
+                        losses['invariant_loss'] = invariant_loss
+                    if entropy_loss is not None:
+                        entropy_loss = entropy_loss.mean()
+                        losses['entropy_loss'] = entropy_loss
                 elif type == "map":
                     losses = head(x, gt_masks_bev)
+                    if self.encoders.camera.vtransform.return_depth:
+                        dbound = self.encoders.camera.vtransform.dbound
+                        depth_loss = get_depth_loss(gt_depth.squeeze(2),pred_depth,dbound)
+                        losses['depth_loss'] = 3*depth_loss
+                    if invariant_loss is not None:
+                        invariant_loss = invariant_loss.mean()
+                        losses['invariant_loss'] = invariant_loss
+                    if entropy_loss is not None:
+                        entropy_loss = entropy_loss.mean()
+                        losses['entropy_loss'] = entropy_loss
                 else:
                     raise ValueError(f"unsupported head: {type}")
                 for name, val in losses.items():
                     if val.requires_grad:
+                        #vanan
+                        if torch.isnan(val).any():
+                            print(f"nan in {name}")
+                            val = torch.zeros_like(val).to(x[0].device)
                         outputs[f"loss/{type}/{name}"] = val * self.loss_scale[type]
+                    else:
+                        outputs[f"stats/{type}/{name}"] = val
+            
+            for type, head in self.aux_camera_heads.items():
+                if type == "object":
+                    pred_dict = head(features[0], metas)
+                    losses = head.loss(gt_bboxes_3d, gt_labels_3d, pred_dict)
+                    if self.encoders.camera.vtransform.return_depth:
+                        dbound = self.encoders.camera.vtransform.dbound
+                        depth_loss = get_depth_loss(gt_depth.squeeze(2),pred_depth,dbound)
+                        losses['depth_loss'] = 3*depth_loss
+                elif type == "map":
+                    losses = head(features[0], gt_masks_bev)
+                    if self.encoders.camera.vtransform.return_depth:
+                        dbound = self.encoders.camera.vtransform.dbound
+                        depth_loss = get_depth_loss(gt_depth.squeeze(2),pred_depth,dbound)
+                        losses['depth_loss'] = 3*depth_loss
+                else:
+                    raise ValueError(f"unsupported head: {type}")
+                for name, val in losses.items():
+                    if val.requires_grad:
+                        if torch.isnan(val).any():
+                            print(f"nan in {name}")
+                            val = torch.zeros_like(val).to(x[0].device)
+                        outputs[f"aux_camera_loss/{type}/{name}"] = val * self.loss_scale[type]
+                    else:
+                        outputs[f"stats/{type}/{name}"] = val
+            
+            for type, head in self.aux_invariant_heads.items():
+                if type == "object":
+                    pred_dict = head(camera_invar_feat, metas)
+                    losses = head.loss(gt_bboxes_3d, gt_labels_3d, pred_dict)
+                    if self.encoders.camera.vtransform.return_depth:
+                        dbound = self.encoders.camera.vtransform.dbound
+                        depth_loss = get_depth_loss(gt_depth.squeeze(2),pred_depth,dbound)
+                        losses['depth_loss'] = 3*depth_loss
+                elif type == "map":
+                    losses = head(camera_invar_feat, gt_masks_bev)
+                    if self.encoders.camera.vtransform.return_depth:
+                        dbound = self.encoders.camera.vtransform.dbound
+                        depth_loss = get_depth_loss(gt_depth.squeeze(2),pred_depth,dbound)
+                        losses['depth_loss'] = 3*depth_loss
+                else:
+                    raise ValueError(f"unsupported head: {type}")
+                for name, val in losses.items():
+                    if val.requires_grad:
+                        if torch.isnan(val).any():
+                            print(f"nan in {name}")
+                            val = torch.zeros_like(val).to(x[0].device)
+                        outputs[f"aux_invariant_loss/{type}/{name}"] = val * self.loss_scale[type]
                     else:
                         outputs[f"stats/{type}/{name}"] = val
             return outputs

@@ -1,7 +1,7 @@
 import argparse
 import copy
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 import random
 import time
 

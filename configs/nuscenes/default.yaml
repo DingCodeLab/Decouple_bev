@@ -141,7 +141,7 @@ train_pipeline:
 
   # -
   #   type: SelectPointSamples
-  #   fg_weigth: 2.0 # 默认为2.0
+  #   fg_weigth: 2.0 #2.0
   #   point_sample_mask_thresold: 0.5
 
   -
