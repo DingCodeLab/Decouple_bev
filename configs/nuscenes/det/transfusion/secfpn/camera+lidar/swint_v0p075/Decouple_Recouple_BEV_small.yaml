@@ -1,0 +1,424 @@
+optimizer:
+  lr: 5.0e-5 # 4GPU * 2Per  6
+
+max_epochs: 12 # 6 12 24
+
+
+
+data:
+  samples_per_gpu: 2 # 1 2
+  workers_per_gpu: 2 # 8 16
+  
+
+_dim_: 256 # 256 + 80
+_pos_dim_: 128 # dim // 2
+_ffn_dim_: 512 # dim * 2
+
+_num_levels_: 1
+bev_h_: 180
+bev_w_: 180
+
+_dual_dims_: 128 # 256 + 80
+_dual_ffn_dim_: 128 # 336 *2
+
+_camera_dim_: 80
+_camera_pos_dim_: 40
+_camera_ffn_dim_: 160
+
+_lidar_dim_: 256
+_lidar_pos_dim_: 128
+_lidar_ffn_dim_: 512
+
+_invariant_dim_: 32
+
+
+# frozen_encoders_flag: True
+# frozen_lidar_encoders_flag: True
+
+# find_unused_parameters: True
+
+# init_aux_invariant_heads_with_heads_flag: True
+
+
+# resume_from: ''
+# load_from: ''
+
+
+model:
+
+  encoders:
+    camera:
+      vtransform:
+        type: DepthLSSTransform
+        out_channels: 80 
+        return_depth: False
+  decoder:
+    backbone:
+      type: SECOND
+      in_channels: 128
+      out_channels: [128, 256]
+      layer_nums: [5, 5]
+      layer_strides: [1, 2]
+      norm_cfg:
+        type: BN
+        eps: 1.0e-3
+        momentum: 0.01
+      conv_cfg:
+        type: Conv2d
+        bias: false
+    neck:
+      type: SECONDFPN
+      in_channels: [128, 256]
+      out_channels: [256, 256]
+      upsample_strides: [1, 2]
+      norm_cfg:
+        type: BN
+        eps: 1.0e-3
+        momentum: 0.01
+      upsample_cfg:
+        type: deconv
+        bias: false
+      use_conv_for_no_stride: true
+  heads:
+    object:
+      in_channels: 512 # 512 256 336
+  fuser:
+    type: PerceptionTransformer
+    bev_h: ${bev_h_}
+    bev_w: ${bev_w_}
+    embed_dims: ${_dim_}
+    camera_dims: ${_camera_dim_}
+    lidar_dims: ${_lidar_dim_}
+    invariant_dims: ${_invariant_dim_}
+    # drop_modality: 'lidar' ## 'camera' 'lidar'
+    camera_positional_encoding:
+      type: LearnedPositionalEncoding
+      num_feats: ${_camera_pos_dim_}
+      row_num_embed: ${bev_h_}
+      col_num_embed: ${bev_w_}
+    lidar_positional_encoding:
+      type: LearnedPositionalEncoding
+      num_feats: ${_lidar_pos_dim_}
+      row_num_embed: ${bev_h_}
+      col_num_embed: ${bev_w_}
+
+
+    camera_transformer:
+      type: BEVFormerEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'BEVFormerLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+        feedforward_channels: ${_camera_ffn_dim_}
+        ffn_embed_dims: ${_camera_dim_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, ffn, norm]
+
+    lidar_transformer:
+      type: BEVFormerEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'BEVFormerLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+        feedforward_channels: ${_lidar_ffn_dim_}
+        ffn_embed_dims: ${_lidar_dim_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, ffn, norm]
+    
+    modality_invariant_encoder:
+      type: invarEncoder
+      camera_in_channels: ${_camera_dim_}
+      lidar_in_channels: ${_lidar_dim_}
+      invariant_out_channels: ${_invariant_dim_}
+      hidden_channel: 64
+
+    cqlkv_transformer: # camera query  liadr key value
+      type: InteractionEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'InteractionLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_invariant_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_camera_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+        feedforward_channels: ${_camera_ffn_dim_}
+        ffn_embed_dims: ${_camera_dim_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, inter_attn, norm, ffn, norm]
+
+    lqckv_transformer: # lidar query  camera key value
+      type: InteractionEncoder
+      num_layers: 1
+      return_intermediate: false
+      
+      transformerlayers:
+        type: 'InteractionLayer'
+        attn_cfgs:
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_lidar_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_invariant_dim_}
+            num_levels: 1
+          - type: 'CustomMSDeformableAttention'
+            embed_dims: ${_lidar_dim_}
+            value_dims: ${_camera_dim_}
+            num_levels: 1
+        feedforward_channels: ${_lidar_ffn_dim_}
+        ffn_embed_dims: ${_lidar_dim_}
+        ffn_dropout: 0.1
+        operation_order: [self_attn, norm, cross_attn, norm, inter_attn, norm, ffn, norm]
+    
+    moe_feature_fusion:
+      type: 'MOEFusers'
+      use_entropy_loss: False
+      c_camera: ${_camera_dim_}
+      c_lidar: ${_lidar_dim_}
+      c_out: ${_dual_dims_}
+      H: ${bev_h_}
+      W: ${bev_w_}
+
+
+  # # # camera head  https://blog.csdn.net/CV_Autobot/article/details/130418232
+  # aux_camera_heads:
+  #   object:
+  #     type: TransFusionHead
+  #     num_proposals: 200
+  #     auxiliary: true
+  #     in_channels: ${_camera_dim_}
+  #     hidden_channel: 128
+  #     num_classes: 10
+  #     num_decoder_layers: 1
+  #     num_heads: 8
+  #     nms_kernel_size: 3
+  #     ffn_channel: 256
+  #     dropout: 0.1
+  #     bn_momentum: 0.1
+  #     activation: relu
+  #     train_cfg:
+  #       dataset: nuScenes
+  #       point_cloud_range: ${point_cloud_range}
+  #       grid_size: [1440, 1440, 41]
+  #       voxel_size: ${voxel_size}
+  #       out_size_factor: 8
+  #       gaussian_overlap: 0.1
+  #       min_radius: 2
+  #       pos_weight: -1
+  #       code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
+  #       assigner:
+  #         type: HungarianAssigner3D
+  #         iou_calculator:
+  #           type: BboxOverlaps3D
+  #           coordinate: lidar
+  #         cls_cost:
+  #           type: FocalLossCost
+  #           gamma: 2.0
+  #           alpha: 0.25
+  #           weight: 0.15
+  #         reg_cost:
+  #           type: BBoxBEVL1Cost
+  #           weight: 0.25
+  #         iou_cost:
+  #           type: IoU3DCost
+  #           weight: 0.25
+  #     test_cfg:
+  #       dataset: nuScenes
+  #       grid_size: [1440, 1440, 41]
+  #       out_size_factor: 8
+  #       voxel_size: ${voxel_size[:2]}
+  #       pc_range: ${point_cloud_range[:2]}
+  #       nms_type: null
+  #     common_heads:
+  #       center: [2, 2]
+  #       height: [1, 2]
+  #       dim: [3, 2]
+  #       rot: [2, 2]
+  #       vel: [2, 2]
+  #     bbox_coder:
+  #       type: TransFusionBBoxCoder
+  #       pc_range: ${point_cloud_range[:2]}
+  #       post_center_range: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
+  #       score_threshold: 0.0
+  #       out_size_factor: 8
+  #       voxel_size: ${voxel_size[:2]}
+  #       code_size: 10
+  #     loss_cls: 
+  #       type: FocalLoss
+  #       use_sigmoid: true
+  #       gamma: 2.0
+  #       alpha: 0.25
+  #       reduction: mean
+  #       loss_weight: 1.0
+  #     loss_heatmap:
+  #       type: GaussianFocalLoss
+  #       reduction: mean
+  #       loss_weight: 1.0
+  #     loss_bbox:
+  #       type: L1Loss
+  #       reduction: mean
+  #       loss_weight: 0.25
+
+
+  # # invariant head  https://blog.csdn.net/CV_Autobot/article/details/130418232
+  aux_invariant_heads:
+    object:
+      type: TransFusionHead
+      num_proposals: 200
+      auxiliary: true
+      in_channels: ${_invariant_dim_}
+      hidden_channel: 128
+      num_classes: 10
+      num_decoder_layers: 1
+      num_heads: 8
+      nms_kernel_size: 3
+      ffn_channel: 256
+      dropout: 0.1
+      bn_momentum: 0.1
+      activation: relu
+      train_cfg:
+        dataset: nuScenes
+        point_cloud_range: ${point_cloud_range}
+        grid_size: [1440, 1440, 41]
+        voxel_size: ${voxel_size}
+        out_size_factor: 8
+        gaussian_overlap: 0.1
+        min_radius: 2
+        pos_weight: -1
+        code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
+        assigner:
+          type: HungarianAssigner3D
+          iou_calculator:
+            type: BboxOverlaps3D
+            coordinate: lidar
+          cls_cost:
+            type: FocalLossCost
+            gamma: 2.0
+            alpha: 0.25
+            weight: 0.15
+          reg_cost:
+            type: BBoxBEVL1Cost
+            weight: 0.25
+          iou_cost:
+            type: IoU3DCost
+            weight: 0.25
+      test_cfg:
+        dataset: nuScenes
+        grid_size: [1440, 1440, 41]
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        pc_range: ${point_cloud_range[:2]}
+        nms_type: null
+      common_heads:
+        center: [2, 2]
+        height: [1, 2]
+        dim: [3, 2]
+        rot: [2, 2]
+        vel: [2, 2]
+      bbox_coder:
+        type: TransFusionBBoxCoder
+        pc_range: ${point_cloud_range[:2]}
+        post_center_range: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
+        score_threshold: 0.0
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        code_size: 10
+      loss_cls: 
+        type: FocalLoss
+        use_sigmoid: true
+        gamma: 2.0
+        alpha: 0.25
+        reduction: mean
+        loss_weight: 1.0
+      loss_heatmap:
+        type: GaussianFocalLoss
+        reduction: mean
+        loss_weight: 1.0
+      loss_bbox:
+        type: L1Loss
+        reduction: mean
+        loss_weight: 0.25
+
+# #########################################Lidar#############################################
+
+# beam_missing  cross_sensor  crosstalk  fog  incomplete_echo motion_blur  snow  wet_ground
+# beam_missing   crosstalk  fog  incomplete_echo motion_blur  snow 
+# corruption: beam_missing
+
+# severity: heavy # light moderate heavy
+
+# corruption_root: '/data/8T/public/OpenDataLab___nuScenes-C/raw/pointcloud/nuScenes-C/nuScenes-C'
+
+# #############################################################################################
+
+########################################Camera#############################################
+
+# # Brightness CameraCrash ColorQuant Fog FrameLost LowLight MotionBlur Snow
+
+# # Brightness  ColorQuant Fog  LowLight MotionBlur Snow
+# camera_corruption: LowLight
+
+# # # easy mid hard
+# camera_severity: hard
+
+# camera_corruption_root: '/data/8T/public/OpenDataLab___nuScenes-C/raw/image/nuScenes-C/nuScenes-C'
+
+#############################################################################################
+
+
+# data:
+#   test:
+    
+#     corruption: ${corruption}  
+#     severity: ${severity}
+#     corruption_root: ${corruption_root}
+
+    # camera_corruption: ${camera_corruption} 
+    # camera_severity: ${camera_severity}
+    # camera_corruption_root: ${camera_corruption_root}
+
+    # view_drop_nums: 5 # 0 1 3 5
+
+
+
+# data:
+#   val:
+#     corruption: ${corruption}
+#     severity: ${severity}
+#     corruption_root: ${corruption_root}
+
+#     camera_corruption: ${camera_corruption}
+#     camera_severity: ${camera_severity}
+#     camera_corruption_root: ${camera_corruption_root}
